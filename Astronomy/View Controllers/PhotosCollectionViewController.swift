@@ -22,6 +22,9 @@ class PhotosCollectionViewController: UIViewController, UICollectionViewDataSour
             self.roverInfo = rover
         }
         
+        imageFilteringQueue.maxConcurrentOperationCount = 2 //3
+        photoFetchQueue.maxConcurrentOperationCount = 2
+        
         configureTitleView()
         updateViews()
     }
@@ -40,6 +43,7 @@ class PhotosCollectionViewController: UIViewController, UICollectionViewDataSour
         guard let index = solDescriptions.index(of: solDescription) else { return }
         guard index < solDescriptions.count - 1 else { return }
         self.solDescription = solDescriptions[index+1]
+//         print("solDescription: \(self.solDescription)")
     }
     
     // UICollectionViewDataSource/Delegate
@@ -134,17 +138,18 @@ class PhotosCollectionViewController: UIViewController, UICollectionViewDataSour
         let photoReference = photoReferences[indexPath.item]
         
         // Check for image in cache
-        if let cachedImageData = cache.value(for: photoReference.id),
-            let image = UIImage(data: cachedImageData) {
-            cell.imageView.image = image.filtered()
-            return
+        if let image = cache.value(for: photoReference.id) {
+                cell.imageView.image = image
+                return
         }
+  
         
         // Start an operation to fetch image data
         let fetchOp = FetchPhotoOperation(photoReference: photoReference)
+        let filterOp = FilterImageOperation(fetchOperation: fetchOp)
         let cacheOp = BlockOperation {
-            if let data = fetchOp.imageData {
-                self.cache.cache(value: data, for: photoReference.id)
+            if let image = filterOp.image {
+                self.cache.cache(value: image, for: photoReference.id)
             }
         }
         let completionOp = BlockOperation {
@@ -155,16 +160,20 @@ class PhotosCollectionViewController: UIViewController, UICollectionViewDataSour
                 return // Cell has been reused
             }
             
-            if let data = fetchOp.imageData {
-                cell.imageView.image = UIImage(data: data)?.filtered()
+            if let image = filterOp.image {
+                cell.imageView.image = image
             }
         }
         
-        cacheOp.addDependency(fetchOp)
-        completionOp.addDependency(fetchOp)
+        // fetch, filter, cache, completion
+        
+        filterOp.addDependency(fetchOp)
+        cacheOp.addDependency(filterOp)
+        completionOp.addDependency(filterOp)    // can I get a visual here? for the logic?
         
         photoFetchQueue.addOperation(fetchOp)
         photoFetchQueue.addOperation(cacheOp)
+        imageFilteringQueue.addOperation(filterOp)
         OperationQueue.main.addOperation(completionOp)
         
         operations[photoReference.id] = fetchOp
@@ -172,8 +181,9 @@ class PhotosCollectionViewController: UIViewController, UICollectionViewDataSour
     
     // Properties
     
+    private let imageFilteringQueue = OperationQueue() //TODO: may need to limit concurrency, so app doesn't run out of memory
     private let client = MarsRoverClient()
-    private let cache = Cache<Int, Data>()
+    private let cache = Cache<Int, UIImage>()
     private let photoFetchQueue = OperationQueue()
     private var operations = [Int : Operation]()
     
@@ -187,6 +197,7 @@ class PhotosCollectionViewController: UIViewController, UICollectionViewDataSour
             if let rover = roverInfo,
                 let sol = solDescription?.sol {
                 photoReferences = []
+                cache.clear()
                 client.fetchPhotos(from: rover, onSol: sol) { (photoRefs, error) in
                     if let e = error { NSLog("Error fetching photos for \(rover.name) on sol \(sol): \(e)"); return }
                     self.photoReferences = photoRefs ?? []
@@ -194,6 +205,12 @@ class PhotosCollectionViewController: UIViewController, UICollectionViewDataSour
                 }
             }
         }
+    }
+    
+    override func didReceiveMemoryWarning() {
+        super.didReceiveMemoryWarning()
+        cache.clear()
+        print("didReceiveMemoryWarning()")
     }
     private var photoReferences = [MarsPhotoReference]() {
         didSet {
